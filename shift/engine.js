@@ -1,14 +1,19 @@
-export const ROUND_TYPES = ['sprint','door','puzzle','connect'];
-export const DURATIONS = [120,90,90,90];
-export const normalize = value => String(value).normalize('NFKC').toLocaleLowerCase('nl').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[’‘]/g,"'").replace(/[-–—]/g,' ').replace(/[.,!?;:]/g,'').replace(/\s+/g,' ').trim();
+// Spelregels van SHIFT: vijf rondes van elk maximaal 120 punten.
+export const ROUND_TYPES = ['sprint','door','puzzle','connect','final'];
+export const DURATIONS = [120,90,90,90,75];
+export const MAX_SCORE = 120*ROUND_TYPES.length;
+export const FINAL_POINTS = 8;      // per gevonden finale-antwoord; 15 antwoorden = 120
+export const PUZZLE_MISTAKES = 3;
+export const CONNECT_MISTAKES = 6;
+
+export const normalize = value => String(value).replace(/­/g,'').normalize('NFKC').toLocaleLowerCase('nl').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[’‘]/g,"'").replace(/[-–—]/g,' ').replace(/[.,!?;:]/g,'').replace(/\s+/g,' ').trim();
 export function shuffle(items,rng=Math.random) { const a=[...items]; for(let i=a.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a; }
 const inputForm=value=>normalize(value).replace(/^(?:ik denk (?:vooral )?aan|denk (?:ook )?aan|bijvoorbeeld|zoals)\s+/,'').replace(/^(?:de|het|een)\s+/,'');
-const compact=value=>value.replace(/\s/g,'');
+const compact=value=>value.replace(/\s/g,'').replace(/['₂₃₆]/g,m=>({'₂':'2','₃':'3','₆':'6'}[m]??''));
 function spellingDistance(a,b){
   const shortest=Math.min(a.length,b.length),limit=shortest>=10?2:shortest>=4?1:0;
   if(!limit||Math.abs(a.length-b.length)>limit)return Infinity;
-  // Wait for a typing pause before accepting a nearly complete word.
-  // A short initial fragment remains a fragment, even when unique.
+  // Wacht op een typpauze voordat een bijna volledig woord telt.
   if((a.startsWith(b)||b.startsWith(a))&&(shortest<5||Math.abs(a.length-b.length)>1))return Infinity;
   const rows=Array.from({length:a.length+1},()=>Array(b.length+1).fill(0));
   for(let i=0;i<=a.length;i++)rows[i][0]=i;for(let j=0;j<=b.length;j++)rows[0][j]=j;
@@ -21,55 +26,58 @@ function spellingDistance(a,b){
 export function matchAnswer(text,answers,found=[],allowSameAnswerPrefix=false,allowTypos=false) {
   const value=inputForm(text),joined=compact(value); if(!value)return {kind:'none'};
   let candidates=answers.filter(a=>a.aliases.some(v=>inputForm(v)===value));
-  if(!candidates.length&&joined.length>=5)candidates=answers.filter(a=>a.aliases.some(v=>compact(inputForm(v))===joined));
+  if(!candidates.length&&joined.length>=2)candidates=answers.filter(a=>a.aliases.some(v=>compact(inputForm(v))===joined));
   if(!candidates.length&&allowTypos){const scores=answers.map(a=>({answer:a,distance:Math.min(...a.aliases.map(v=>spellingDistance(joined,compact(inputForm(v)))))}));const best=Math.min(...scores.map(s=>s.distance));if(Number.isFinite(best))candidates=scores.filter(s=>s.distance===best).map(s=>s.answer);}
+  if(candidates.length>1){const open=candidates.filter(a=>!found.includes(a.id));if(open.length===1)candidates=open;}
   if(candidates.length!==1)return {kind:candidates.length?'ambiguous':'none'};
   const a=candidates[0];
   if(!allowSameAnswerPrefix&&answers.some(other=>other.aliases.some(v=>compact(inputForm(v)).startsWith(joined)&&compact(inputForm(v))!==joined)))return {kind:'prefix',answer:a};
   return {kind:found.includes(a.id)?'duplicate':'correct',answer:a};
 }
 export function roundPoints(found,total){return Math.round(120*Math.min(found,total)/total);}
-function pick(items,recent,rng){const fresh=items.filter(x=>!recent.includes(x.id));if(fresh.length)return shuffle(fresh,rng)[0];const oldest=Math.max(...items.map(x=>recent.indexOf(x.id)));return shuffle(items.filter(x=>recent.indexOf(x.id)===oldest),rng)[0];}
-function balanced(items,count,rng){
-  const courses=[...new Set(items.map(x=>x.source.course))];let out=[];
-  for(const c of courses)out.push(...shuffle(items.filter(x=>x.source.course===c),rng).slice(0,Math.floor(count/courses.length)));
-  out.push(...shuffle(items.filter(x=>!out.some(y=>y.id===x.id)),rng).slice(0,count-out.length));return shuffle(out,rng);
+
+// Kies items die recent niet zijn gespeeld, met zoveel mogelijk verschillende onderwerpen.
+function pickVaried(items,count,recent,rng){
+  const fresh=items.filter(x=>!recent.includes(x.id)),pool=fresh.length>=count?fresh:items;
+  const out=[],topics=new Set();
+  for(const x of shuffle(pool,rng)){if(out.length===count)break;if(!topics.has(x.topic)){out.push(x);topics.add(x.topic);}}
+  for(const x of shuffle(pool,rng)){if(out.length===count)break;if(!out.includes(x))out.push(x);}
+  return out;
 }
 function connectionPairs(items,count,recent,rng){
- const courses=[...new Set(items.map(x=>x.source.course))],target=Math.floor(count/courses.length);
  const compatible=(p,chosen)=>chosen.every(x=>normalize(x.label)!==normalize(p.label)&&normalize(x.definition)!==normalize(p.definition)&&!x.conflictIds?.includes(p.id)&&!p.conflictIds?.includes(x.id));
  for(let attempt=0;attempt<24;attempt++){
-  const ordered=shuffle(items,rng).sort((a,b)=>{const ai=recent.indexOf(a.id),bi=recent.indexOf(b.id);return ai===-1&&bi!==-1?-1:bi===-1&&ai!==-1?1:bi-ai;}),chosen=[];
-  for(const course of shuffle(courses,rng))for(const p of ordered.filter(x=>x.source.course===course)){if(chosen.filter(x=>x.source.course===course).length>=target)break;if(compatible(p,chosen))chosen.push(p);}
-  for(const p of ordered){if(chosen.length===count)break;if(!chosen.includes(p)&&compatible(p,chosen))chosen.push(p);}
+  const fresh=shuffle(items.filter(x=>!recent.includes(x.id)),rng),old=shuffle(items.filter(x=>recent.includes(x.id)),rng),chosen=[];
+  for(const p of [...fresh,...old]){if(chosen.length===count)break;if(compatible(p,chosen))chosen.push(p);}
   if(chosen.length===count)return shuffle(chosen,rng);
  }
- throw new Error('Deze bank heeft onvoldoende eenduidige connecties.');
+ throw new Error('Te weinig eenduidige connecties in de vragenbank.');
 }
-export function createGame(bank,week,timed=true,recent=[],rng=Math.random,now=Date.now()) {
-  const pool=bank.terms.filter(x=>week===0||x.week===week);
-  const quizPool=bank.sprints.filter(x=>week===0||x.week===week);
-  const fresh=quizPool.filter(x=>!recent.includes(x.id));
-  const questions=balanced(fresh.length>=6?fresh:quizPool,6,rng).map((q,i)=>({...q,
-    entry:q.entryMode==='choice'?'choice':i===1||i===4?'input':'choice',options:shuffle([q.answer,...shuffle(q.distractors.filter(x=>normalize(x)!==normalize(q.answer)),rng).slice(0,3)],rng)}));
-  const door=pick(bank.doors.filter(x=>week===0||x.week===week),recent,rng);
-  const puzzle=pick(bank.puzzles.filter(x=>week===0||x.week===week),recent,rng);
-  const pairs=connectionPairs(pool,6,recent,rng);
+export function createGame(bank,timed=true,recent=[],rng=Math.random,now=Date.now()) {
+  const choice=pickVaried(bank.sprints.filter(q=>q.kind==='choice'),3,recent,rng);
+  const typed=pickVaried(bank.sprints.filter(q=>q.kind==='input'),3,recent,rng);
+  const questions=[choice[0],typed[0],choice[1],typed[1],choice[2],typed[2]].map(q=>({...q,entry:q.kind==='input'?'input':'choice',options:q.kind==='input'?[]:shuffle([q.answer,...q.distractors],rng)}));
+  const door=pickVaried(bank.doors,1,recent,rng)[0];
+  const puzzle=pickVaried(bank.puzzles,1,recent,rng)[0];
+  const pairs=connectionPairs(bank.terms,6,recent,rng);
+  const finals=pickVaried(bank.finals,6,recent,rng);
+  const labels=shuffle([...puzzle.groups.map(g=>({id:g.id,label:g.label})),...puzzle.decoys.map((label,i)=>({id:puzzle.id+'-decoy'+i,label}))],rng);
   const rounds=[{type:'sprint',questions,index:0,results:[],answered:false},
     {type:'door',question:door,found:[]},
-    {type:'puzzle',question:puzzle,found:[],selected:[],candidate:null,mistakes:0,
+    {type:'puzzle',question:puzzle,labels,found:[],selected:[],candidate:null,mistakes:0,
       cards:shuffle(puzzle.groups.flatMap(g=>g.cards.map((text,i)=>({id:g.id+'-c'+i,group:g.id,text}))),rng)},
-    {type:'connect',pairs,found:[],left:null,mistakes:0,rightOrder:shuffle(pairs.map(p=>p.id),rng)}]
+    {type:'connect',pairs,found:[],left:null,mistakes:0,rightOrder:shuffle(pairs.map(p=>p.id),rng)},
+    {type:'final',queue:finals,index:0,found:[]}]
     .map((r,i)=>({...r,seconds:DURATIONS[i],score:0,deadline:null}));
-  return {id:'game-'+now+'-'+Math.floor(rng()*1e9),version:bank.version,week,timed,round:0,status:'intro',rounds,createdAt:now};
+  return {id:'game-'+now+'-'+Math.floor(rng()*1e9),version:bank.version,timed,round:0,status:'intro',rounds,createdAt:now};
 }
 export function startRound(game,now=Date.now()){
   if(game.status!=='intro')return false;game.status='active';game.rounds[game.round].deadline=game.timed?now+game.rounds[game.round].seconds*1000:null;return true;
 }
-export function remaining(game,now=Date.now()) {const r=game.rounds[game.round];const at=r.feedbackStartedAt??(now+(game.serverOffset||0));return !game.timed?null:r.deadline==null?r.seconds:Math.max(0,Math.ceil((r.deadline-at)/1000));}
+export function remaining(game,now=Date.now()) {const r=game.rounds[game.round];const at=r.feedbackStartedAt??now;return !game.timed?null:r.deadline==null?r.seconds:Math.max(0,Math.ceil((r.deadline-at)/1000));}
 export function finishRound(game){if(game.status!=='active')return false;game.status='review';return true;}
 export function expire(game,now=Date.now()){if(game.status==='active'&&game.timed&&remaining(game,now)===0){finishRound(game);return true;}return false;}
-export function nextRound(game){if(game.status!=='review')return false;if(game.round===3)game.status='finished';else{game.round++;game.status='intro';}return true;}
+export function nextRound(game){if(game.status!=='review')return false;if(game.round===ROUND_TYPES.length-1)game.status='finished';else{game.round++;game.status='intro';}return true;}
 export function answerDoor(game,text,now=Date.now(),allowSameAnswerPrefix=false,allowTypos=false){
   if(expire(game,now)||game.status!=='active')return {kind:'closed'};
   const r=game.rounds[game.round];if(r.type!=='door')return {kind:'closed'};
@@ -96,21 +104,38 @@ export function selectCard(game,id,now=Date.now()){
   if(r.selected.length<r.question.groupSize)return {kind:'selected'};
   const groups=new Set(r.selected.map(x=>r.cards.find(y=>y.id===x).group));
   if(groups.size===1){r.candidate=card.group;return {kind:'name'};}
-  r.selected=[];r.mistakes++;if(r.mistakes>=3)finishRound(game);return {kind:'wrong'};
+  r.selected=[];r.mistakes++;if(r.mistakes>=PUZZLE_MISTAKES)finishRound(game);return {kind:'wrong'};
 }
+// Een goede groep levert de helft van de punten; het juiste verband benoemen de andere helft.
+function puzzleScore(r){const n=r.question.groups.length;return Math.round(120*(r.found.length+r.named.length)/(2*n));}
 export function nameGroup(game,id,now=Date.now()){
   if(expire(game,now)||game.status!=='active')return {kind:'closed'};
   const r=game.rounds[game.round];if(r.type!=='puzzle'||!r.candidate)return {kind:'closed'};
-  const correct=r.candidate===id;
-  if(correct){r.found.push(id);r.score=roundPoints(r.found.length,r.question.groups.length);}else{r.mistakes++;}
-  r.candidate=null;r.selected=[];if(r.found.length===r.question.groups.length||r.mistakes>=3)finishRound(game);
+  r.named??=[];const correct=r.candidate===id;
+  r.found.push(r.candidate);if(correct)r.named.push(r.candidate);r.score=puzzleScore(r);
+  r.candidate=null;r.selected=[];if(r.found.length===r.question.groups.length||r.mistakes>=PUZZLE_MISTAKES)finishRound(game);
   return {kind:correct?'correct':'wrong'};
 }
 export function connect(game,left,right,now=Date.now()){
   if(expire(game,now)||game.status!=='active')return {kind:'closed'};
   const r=game.rounds[game.round];if(r.type!=='connect'||r.found.includes(left)||!r.pairs.some(x=>x.id===left)||!r.pairs.some(x=>x.id===right)||r.found.includes(right))return {kind:'closed'};
   r.left=null;const correct=left===right;if(correct){r.found.push(left);r.score=roundPoints(r.found.length,r.pairs.length);}else{r.mistakes++;}
-  if(r.found.length===r.pairs.length||r.mistakes>=6)finishRound(game);return {kind:correct?'correct':'wrong'};
+  if(r.found.length===r.pairs.length||r.mistakes>=CONNECT_MISTAKES)finishRound(game);return {kind:correct?'correct':'wrong'};
+}
+export const finalQuestion=r=>r.queue[r.index];
+export const finalFound=(r,q=finalQuestion(r))=>r.found.filter(id=>q&&q.answers.some(a=>a.id===id));
+export function answerFinal(game,text,now=Date.now(),allowSameAnswerPrefix=false,allowTypos=false){
+  if(expire(game,now)||game.status!=='active')return {kind:'closed'};
+  const r=game.rounds[game.round];if(r.type!=='final')return {kind:'closed'};
+  const q=finalQuestion(r);const match=matchAnswer(text,q.answers,r.found,allowSameAnswerPrefix,allowTypos);
+  if(match.kind==='correct'){r.found.push(match.answer.id);r.score=Math.min(120,r.found.length*FINAL_POINTS);
+    if(r.score>=120)finishRound(game);else if(finalFound(r,q).length>=q.goal)passFinal(game,now,true);}
+  return match;
+}
+export function passFinal(game,now=Date.now(),internal=false){
+  if(!internal&&(expire(game,now)||game.status!=='active'))return false;
+  const r=game.rounds[game.round];if(r.type!=='final')return false;
+  r.index++;if(r.index>=r.queue.length)finishRound(game);return true;
 }
 export const totalScore=game=>game.rounds.reduce((s,r)=>s+r.score,0);
-export function usedIds(game){return game.rounds.flatMap(r=>r.questions?.map(q=>q.id)||r.pairs?.map(p=>p.id)||[r.question.id]);}
+export function usedIds(game){return game.rounds.flatMap(r=>r.questions?.map(q=>q.id)||r.pairs?.map(p=>p.id)||r.queue?.map(q=>q.id)||[r.question.id]);}

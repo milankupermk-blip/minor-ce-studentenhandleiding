@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// Gedeelde toplijst van SHIFT. Iedereen mag scores lezen en toevoegen; niets mag worden
+// gewijzigd of verwijderd. De regels controleren de vorm, en of de totaalscore klopt
+// met de vijf rondescores.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function ronde(x) { return x is int && x >= 0 && x <= 120; }
+    match /shift_scores/{doc} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasOnly(['naam', 'score', 'rondes', 'versie', 'datum'])
+        && request.resource.data.keys().hasAll(['naam', 'score', 'rondes', 'versie', 'datum'])
+        && request.resource.data.naam is string
+        && request.resource.data.naam.size() >= 1 && request.resource.data.naam.size() <= 24
+        && request.resource.data.rondes is list && request.resource.data.rondes.size() == 5
+        && ronde(request.resource.data.rondes[0]) && ronde(request.resource.data.rondes[1])
+        && ronde(request.resource.data.rondes[2]) && ronde(request.resource.data.rondes[3])
+        && ronde(request.resource.data.rondes[4])
+        && request.resource.data.score == request.resource.data.rondes[0] + request.resource.data.rondes[1]
+           + request.resource.data.rondes[2] + request.resource.data.rondes[3] + request.resource.data.rondes[4]
+        && request.resource.data.versie is string && request.resource.data.versie.size() <= 40
+        && request.resource.data.datum is timestamp
+        && request.resource.data.datum > request.time - duration.value(10, 'm')
+        && request.resource.data.datum < request.time + duration.value(10, 'm');
+      allow update, delete: if false;
+    }
+  }
+}
